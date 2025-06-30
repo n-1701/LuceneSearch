@@ -1,0 +1,252 @@
+﻿@model SearchModel
+@{
+    ViewData["Title"] = "Search";
+}
+
+<div class="container mt-5">
+    <div class="row">
+        <div class="col-md-8 offset-md-2">
+            <form id="searchForm" class="mb-4">
+                <div class="card mb-4">
+                    <div class="card-header">
+                        Search Criteria
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label for="keyword" class="form-label">Keyword</label>
+                            <input type="text" class="form-control" id="keyword" name="keyword" autocomplete="off">
+                        </div>
+                        <div class="mb-3">
+                            <label for="speciality" class="form-label">Speciality</label>
+                            <input type="text" class="form-control" id="speciality" name="speciality" autocomplete="off">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card mb-4">
+                    <div class="card-header">
+                        Location Search
+                    </div>
+                    <div class="card-body">
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <label for="country" class="form-label">Country</label>
+                                <input readonly type="text" class="form-control" id="country" name="country" value="United Arab Emirates" autocomplete="off">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="region" class="form-label">Region</label>
+                                <input type="text" class="form-control" id="region" name="region" autocomplete="off">
+                            </div>
+                        </div>
+                        <div id="map" style="height: 400px;" class="mb-3"></div>
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <label for="latitude" class="form-label">Latitude</label>
+                                <input readonly type="text" class="form-control" id="latitude" name="latitude">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="longitude" class="form-label">Longitude</label>
+                                <input readonly type="text" class="form-control" id="longitude" name="longitude">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <button type="submit" class="btn btn-primary">Proceed</button>
+            </form>
+            <div id="searchResults"></div>
+        </div>
+    </div>
+</div>
+
+@section Scripts {
+    <script src="https://code.jquery.com/ui/1.13.2/jquery-ui.min.js"></script>
+    <link rel="stylesheet" href="https://code.jquery.com/ui/1.13.2/themes/base/jquery-ui.css">
+    <script src="https://maps.googleapis.com/maps/api/js?key=@ViewBag.GoogleMapsApiKey&libraries=places"></script>
+
+    <script>
+        let map;
+        let marker;
+        let geocoder;
+        let latitude, longitude, businessAddress;
+
+        function initMap() {
+
+            if (latitude == null && longitude == null) {
+                latitude = 24.466667;
+                longitude = 54.366669;
+            }
+            let uluru = { lat: parseFloat(latitude), lng: parseFloat(longitude) };
+
+            geocoder = new google.maps.Geocoder();
+            map = new google.maps.Map(document.getElementById('map'), {
+                zoom: 10,
+                center: uluru, mapTypeId: google.maps.MapTypeId.ROADMAP
+            });
+
+            marker = new google.maps.Marker({
+                position: uluru,
+                map: map,
+                draggable: true
+            });
+
+            google.maps.event.addListener(marker, 'dragend', function () {
+                const position = marker.getPosition();
+                updateCoordinates(position.lat(), position.lng());
+                reverseGeocode(position);
+            });
+
+            map.addListener('click', function (e) {
+                placeMarker(e.latLng);
+            });
+        }
+
+        function placeMarker(location) {
+            marker.setPosition(location);
+            map.panTo(location);
+            updateCoordinates(location.lat(), location.lng());
+        }
+
+        function updateCoordinates(lat, lng) {
+            $('#latitude').val(lat);
+            $('#longitude').val(lng);
+        }
+
+        function reverseGeocode(position) {
+            geocoder.geocode({ location: position }, (results, status) => {
+                if (status === "OK") {
+                    if (results[0]) {
+                        const addressComponents = results[0].address_components;
+                        let country = '';
+                        let region = '';
+
+                        for (const component of addressComponents) {
+                            if (component.types.includes("country")) {
+                                country = component.long_name;
+                            }
+                            if (component.types.includes("administrative_area_level_1")) {
+                                region = component.long_name;
+                            }
+                        }
+
+                        $("#country").val(country);
+                        $("#region").val(region);
+                    }
+                }
+            });
+        }
+
+        function geocodeLocation() {
+            const country = $('#country').val();
+            const region = $('#region').val();
+            const address = `${region}, ${country}`;
+            let countryRestrict = 'United Arab Emirates';
+
+            geocoder.geocode({ address: address }, function (results, status) {
+                if (status === 'OK') {
+                    const location = results[0].geometry.location;
+                    map.setZoom(10);
+                    placeMarker(location);
+                }
+            });
+        }
+
+        $(document).ready(function () {
+            initMap();
+
+            // Existing autocomplete for keyword and speciality
+            $("#keyword").autocomplete({
+                source: function (request, response) {
+                    $.get("/Home/GetKeywordSuggestions", { query: request.term })
+                        .done(function (data) {
+                            response(data);
+                        });
+                },
+                minLength: 2
+            });
+
+            $("#speciality").autocomplete({
+                source: function (request, response) {
+                    $.get("/Home/GetSpecialitySuggestions", { query: request.term })
+                        .done(function (data) {
+                            response(data);
+                        });
+                },
+                minLength: 2
+            });
+
+            // Location autocomplete
+            $("#country").autocomplete({
+                source: function (request, response) {
+                    $.get("/Home/GetCountrySuggestions", { query: request.term })
+                        .done(function (data) {
+                            response(data.map(item => ({
+                                label: item.description,
+                                value: item.description,
+                                placeId: item.placeId,
+                                lat: item.latitude,
+                                lng: item.longitude
+                            })));
+                        });
+                },
+                minLength: 2,
+                select: function (event, ui) {
+                    countryRestrict = ui.item.label ?? 'United Arab Emirates';
+                    if (ui.item.lat && ui.item.lng) {
+                        const position = new google.maps.LatLng(ui.item.lat, ui.item.lng);
+                        map.setCenter(position);
+                        map.setZoom(5);
+                        marker.setPosition(position);
+                        updateCoordinates(ui.item.lat, ui.item.lng);
+                    }
+                }
+            });
+
+            $("#region").autocomplete({
+                source: function (request, response) {
+
+                    if (typeof countryRestrict === 'undefined' || !countryRestrict) {
+                        countryRestrict = 'United Arab Emirates';
+                    }
+                    $.get("/Home/GetRegionSuggestions", {
+                        query: request.term,
+                        country: countryRestrict
+                    })
+                        .done(function (data) {
+                            response(data.map(item => ({
+                                label: item.description,
+                                value: item.description,
+                                placeId: item.placeId,
+                                lat: item.latitude,
+                                lng: item.longitude
+                            })));
+                        });
+                },
+                minLength: 2,
+                select: function (event, ui) {
+                    $.get("/Home/GetPosition", { placeid: ui.item.placeId }).done(
+                        function (data) {
+                            if (data.latitude && data.longitude) {
+                                let uluru = { lat: parseFloat(data.latitude), lng: parseFloat(data.longitude) };
+                                map.setCenter(uluru);
+                                map.setZoom(15);
+                                marker.setPosition(uluru);
+                                updateCoordinates(data.latitude, data.longitude);
+                                return;
+                            }
+                        }
+                    );
+                }
+            });
+
+            $("#searchForm").on("submit", function (e) {
+                e.preventDefault();
+                console.log($(this).serialize());
+                $.post("/Home/Search", $(this).serialize())
+                    .done(function (data) {
+                        $("#searchResults").html(data);
+                    });
+            });
+        });
+    </script>
+}

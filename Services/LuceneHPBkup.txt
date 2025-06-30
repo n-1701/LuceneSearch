@@ -1,0 +1,351 @@
+﻿//using Lucene.Net.Analysis.Standard;
+//using Lucene.Net.Documents;
+//using Lucene.Net.Documents.Extensions;
+//using Lucene.Net.Index;
+//using Lucene.Net.Queries.Function.ValueSources;
+//using Lucene.Net.Search;
+//using Lucene.Net.Spatial.Queries;
+//using Lucene.Net.Spatial.Vector;
+//using Lucene.Net.Store;
+//using Lucene.Net.Util;
+//using Spatial4n.Distance;
+//using WebApp2.Data.Entities;
+//using WebApp2.Models;
+
+//namespace WebApp2.Services
+//{
+//    public class LuceneHProviderService : ILuceneHProviderService
+//    {
+
+//        private const LuceneVersion AppLuceneVersion = LuceneVersion.LUCENE_48;
+//        private readonly FSDirectory _directory;
+//        private readonly StandardAnalyzer _analyzer;
+//        private readonly IndexWriter _writer;
+//        private readonly SearcherManager _searcherManager;
+//        private readonly Spatial4n.Context.SpatialContext _spatialContext;
+//        private readonly PointVectorStrategy _vectorStrategy;
+
+//        public LuceneHProviderService(string indexPath)
+//        {
+//            _directory = FSDirectory.Open(indexPath);
+//            _analyzer = new StandardAnalyzer(AppLuceneVersion);
+
+//            var indexConfig = new IndexWriterConfig(AppLuceneVersion, _analyzer)
+//            {
+//                OpenMode = Lucene.Net.Index.OpenMode.CREATE_OR_APPEND
+//            };
+
+//            _writer = new IndexWriter(_directory, indexConfig);
+//            _searcherManager = new SearcherManager(_writer, true, null);
+//            _spatialContext = Spatial4n.Context.SpatialContext.Geo;
+//            _vectorStrategy = new PointVectorStrategy(_spatialContext, "location");
+//        }
+
+//        public void AddProviders(IEnumerable<HealthcareProvider> providers)
+//        {
+//            foreach (var provider in providers)
+//            {
+//                AddProvider(provider);
+//            }
+//            UpdateIndex();
+//        }
+
+//        public void AddProvider(HealthcareProvider provider)
+//        {
+//            var doc = new Document();
+
+//            // Basic fields
+//            doc.Add(new Int64Field("id", provider.Id, Field.Store.YES));
+//            doc.Add(new TextField("name", provider.Name.ToLowerInvariant(), Field.Store.YES));
+//            doc.Add(new StringField("type", provider.Type, Field.Store.YES));
+//            doc.Add(new TextField("address", (provider.Address ?? string.Empty).ToLowerInvariant(), Field.Store.YES));
+//            doc.Add(new DoubleField("latitude", provider.Latitude, Field.Store.YES));
+//            doc.Add(new DoubleField("longitude", provider.Longitude, Field.Store.YES));
+
+//            // Add keywords with special indexing for exact matching
+//            foreach (var keyword in provider.Keywords)
+//            {
+//                // Store original keyword for exact matching
+//                doc.Add(new StringField("keyword_exact", keyword.ToLower() ?? string.Empty, Field.Store.YES));
+//                // Store analyzed keyword for fuzzy matching
+//                doc.Add(new TextField("keyword", keyword ?? string.Empty, Field.Store.YES));
+//            }
+
+//            // Combined field for general search
+//            var allText = $"{provider.Name} {provider.Type} {string.Join(" ", provider.Keywords)} {provider.Address}";
+//            doc.Add(new TextField("alltext", allText.ToLower() ?? string.Empty, Field.Store.YES));
+//            _writer.UpdateDocument(new Term("id", provider.Id.ToString()), doc);
+//        }
+
+//        public void DeleteProvider(string id)
+//        {
+//            _writer.DeleteDocuments(new Term("id", id));
+//            UpdateIndex();
+//        }
+
+//        public void UpdateIndex()
+//        {
+//            _writer.Commit();
+//            _searcherManager.MaybeRefresh();
+//        }
+
+
+//        private PhraseQuery GetPhraseSlop(string fieldName, string searchPhrase, int slop = 2)
+//        {
+
+//            // Split the phrase into terms
+//            var terms = searchPhrase.ToLowerInvariant().Split(' ');
+//            var phraseQuery = new PhraseQuery
+//            {
+//                Slop = slop // Allow words in between
+//            };
+
+//            // Add terms to maintain their order
+//            for (int i = 0; i < terms.Length; i++)
+//            {
+//                phraseQuery.Add(new Term(fieldName, terms[i]));
+//            }
+
+//            return phraseQuery;
+
+//        }
+
+//        public void ViewAllDocuments()
+//        {
+//            var searcher = _searcherManager.Acquire();
+//            //var searcher = new IndexSearcher(_reader);
+//            var query = new MatchAllDocsQuery();
+//            var hits = searcher.Search(query, int.MaxValue).ScoreDocs;
+
+
+
+//            foreach (var hit in hits)
+//            {
+//                var doc = searcher.Doc(hit.Doc);
+
+//            }
+//        }
+
+//        public LuceneSearchResponse Search(LuceneSearchRequest request)
+//        {
+
+//            _searcherManager.MaybeRefresh();
+//            var searcher = _searcherManager.Acquire();
+//            var response = new LuceneSearchResponse();
+
+//            try
+//            {
+//                if (request.Query.Length <= 6)
+//                {
+//                    var exactKeywords = SearchExactKeywords(searcher, request.Query.ToLower(), request.MaxResults);
+//                    response.ExactKeywordMatches = exactKeywords;
+
+//                    if (exactKeywords.Any())
+//                    {
+//                        response.MatchType = "Keywords";
+//                        return response;
+//                    }
+//                }
+
+
+//                var boolQuery = new BooleanQuery();
+
+//                // Text search with boosts and fuzzy matching
+//                if (!string.IsNullOrEmpty(request.Query))
+//                {
+//                    foreach (var fieldBoost in request.FieldBoosts)
+//                    {
+//                        Query fieldQuery;
+//                        if (request.UseFuzzySearch)
+//                        {
+//                            // Ensure MaxEdits is either 1 or 2
+//                            int maxEdits = Math.Max(1, Math.Min(2, request.MaxEdits));
+//                            var fuzzyQuery = new FuzzyQuery(
+//                                new Term(fieldBoost.Key, request.Query.ToLowerInvariant()),
+//                                maxEdits,
+//                                request.PrefixLength);
+//                            fieldQuery = fuzzyQuery;
+//                        }
+//                        else
+//                        {
+//                            fieldQuery = new TermQuery(new Term(fieldBoost.Key, request.Query.ToLowerInvariant()));
+//                        }
+
+//                        fieldQuery.Boost = fieldBoost.Value;
+//                        boolQuery.Add(fieldQuery, Occur.SHOULD);
+//                    }
+
+//                    boolQuery.Add(GetPhraseSlop("alltext", request.Query.ToLowerInvariant(), 2), Occur.SHOULD);
+//                }
+
+
+//                // Geolocation filter
+//                if (request.Latitude.HasValue && request.Longitude.HasValue)
+//                {
+//                    var center = _spatialContext.MakePoint(request.Longitude.Value, request.Latitude.Value);
+//                    var circle = _spatialContext.MakeCircle(center, DistanceUtils.Dist2Degrees(request.RadiusKm, DistanceUtils.DegreesToKilometers));
+//                    var spatialQuery = new SpatialArgs(SpatialOperation.Intersects, circle);
+//                    var spatialFilter = _vectorStrategy.MakeFilter(spatialQuery);
+//                    boolQuery.Add(new FilteredQuery(new MatchAllDocsQuery(), spatialFilter), Occur.MUST);
+//                }
+
+//                var topDocs = searcher.Search(boolQuery, request.MaxResults);
+//                var results = new List<LuceneSearchResult>();
+
+//                foreach (var scoreDoc in topDocs.ScoreDocs)
+//                {
+//                    var doc = searcher.Doc(scoreDoc.Doc);
+//                    var latitude = double.Parse(doc.Get("latitude"));
+//                    var longitude = double.Parse(doc.Get("longitude"));
+
+//                    double? distanceKm = null;
+//                    if (request.Latitude.HasValue && request.Longitude.HasValue)
+//                    {
+//                        distanceKm = CalculateDistance(
+//                            request.Latitude.Value, request.Longitude.Value,
+//                            latitude, longitude);
+//                    }
+
+//                    results.Add(new LuceneSearchResult
+//                    {
+//                        Provider = new HealthcareProvider
+//                        {
+//                            Id = long.Parse(doc.Get("id")),
+//                            Name = doc.Get("name"),
+//                            Type = doc.Get("type"),
+//                            Address = doc.Get("address"),
+//                            Keywords = doc.GetFields("keyword")
+//                                        .Select(f => f.GetStringValue())
+//                                        .ToList(),
+//                            Latitude = latitude,
+//                            Longitude = longitude
+//                        },
+//                        Score = scoreDoc.Score,
+//                        DistanceKm = distanceKm
+//                    });
+//                }
+//                response.ProviderMatches = results;
+//                // Sort by distance if location is provided
+//                //if (request.Latitude.HasValue && request.Longitude.HasValue)
+//                //{
+//                //    results = results.OrderBy(r => r.DistanceKm).ToList();
+//                //}
+
+//                return response;
+//            }
+//            finally
+//            {
+//                _searcherManager.Release(searcher);
+//            }
+//        }
+
+//        private double CalculateDistance(double lat1, double lon1, double lat2, double lon2)
+//        {
+//            var p1 = _spatialContext.MakePoint(lon1, lat1);
+//            var p2 = _spatialContext.MakePoint(lon2, lat2);
+
+//            return DistanceUtils.Degrees2Dist(
+//                _spatialContext.DistanceCalculator.Distance(p1, p2),
+//                DistanceUtils.DegreesToKilometers);
+//        }
+
+//        private List<string> SearchExactKeywords(IndexSearcher searcher, string searchTerm, int maxResults)
+//        {
+//            var query = new WildcardQuery(new Term("keyword_exact", $"{searchTerm}*"));
+//            var topDocs = searcher.Search(query, maxResults);
+
+//            var uniqueKeywords = new HashSet<string>();
+//            foreach (var scoreDoc in topDocs.ScoreDocs)
+//            {
+//                var doc = searcher.Doc(scoreDoc.Doc);
+//                var keywords = doc.GetFields("keyword_exact")
+//                                .Select(f => f.GetStringValue())
+//                                .Where(k => k.StartsWith(searchTerm, StringComparison.OrdinalIgnoreCase));
+
+//                foreach (var keyword in keywords)
+//                {
+//                    uniqueKeywords.Add(keyword);
+//                }
+//            }
+
+//            return uniqueKeywords.ToList();
+//        }
+
+//        private List<LuceneSearchResult> SearchProviders(IndexSearcher searcher, string searchTerm, int maxResults)
+//        {
+//            var results = new List<LuceneSearchResult>();
+
+//            // Create a boolean query combining exact and fuzzy matches
+//            var booleanQuery = new BooleanQuery();
+
+//            // Exact name match with boost
+//            var nameExactQuery = new TermQuery(new Term("name", searchTerm.ToLower()));
+//            nameExactQuery.Boost = 2.0f;
+//            booleanQuery.Add(nameExactQuery, Occur.SHOULD);
+
+//            // Fuzzy name match
+//            var nameFuzzyQuery = new FuzzyQuery(
+//                new Term("name", searchTerm.ToLower()),
+//                2, // Edit distance
+//                0, // Prefix length
+//                50, // Max expansions
+//                true // Transpose letters
+//            );
+//            booleanQuery.Add(nameFuzzyQuery, Occur.SHOULD);
+
+//            // Keyword partial match
+//            var keywordQuery = new WildcardQuery(new Term("name", $"*{searchTerm.ToLower()}*"));
+//            booleanQuery.Add(keywordQuery, Occur.SHOULD);
+
+//            var topDocs = searcher.Search(booleanQuery, maxResults);
+
+//            foreach (var scoreDoc in topDocs.ScoreDocs)
+//            {
+//                var doc = searcher.Doc(scoreDoc.Doc);
+//                results.Add(new LuceneSearchResult
+//                {
+//                    Provider = new HealthcareProvider
+//                    {
+//                        Id = long.Parse(doc.Get("id")),
+//                        Name = doc.Get("name"),
+//                        Type = doc.Get("type"),
+//                        Address = doc.Get("address"),
+//                        Keywords = doc.GetFields("keyword")
+//                                    .Select(f => f.GetStringValue())
+//                                    .Distinct()
+//                                    .ToList()
+//                    },
+//                    Score = scoreDoc.Score,
+//                    MatchedFields = GetMatchedFields(searcher, scoreDoc.Doc, searchTerm)
+//                });
+//            }
+
+//            return results;
+//        }
+
+//        private string[] GetMatchedFields(IndexSearcher searcher, int docId, string searchTerm)
+//        {
+//            var matchedFields = new HashSet<string>();
+//            var fields = new[] { "name", "keyword", "address" };
+
+//            foreach (var field in fields)
+//            {
+//                var termVector = searcher.IndexReader.GetTermVector(docId, field);
+//                if (termVector != null)
+//                {
+//                    var termsEnum = termVector.GetEnumerator();
+//                    while (termsEnum.MoveNext())
+//                    {
+//                        if (termsEnum.Term.Utf8ToString().Contains(searchTerm.ToLower()))
+//                        {
+//                            matchedFields.Add(field);
+//                            break;
+//                        }
+//                    }
+//                }
+//            }
+
+//            return matchedFields.ToArray();
+//        }
+//    }
+//}
